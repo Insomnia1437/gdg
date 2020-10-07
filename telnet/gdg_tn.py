@@ -8,10 +8,11 @@ import sys
 import telnetlib
 import logging
 import time
+import sys
 import queue
 
-LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
-DATE_FORMAT = "%m/%d/%Y %H:%M:%S %p"
+LOG_FORMAT = "%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s"
+DATE_FORMAT = "%m/%d/%Y %H:%M:%S"
 
 
 class QueueHandler(logging.Handler):
@@ -77,7 +78,7 @@ class TelnetClient:
         if self.tn is None:
             self.logger.error("connection fails")
             return False
-        time.sleep(1)
+        time.sleep(0.5)
         self.logger.info("connected to host: %s, port: %s" % (host, port))
         return True
 
@@ -87,7 +88,7 @@ class TelnetClient:
             return False
         tn_cmd = cmd
         self.tn.write(tn_cmd.encode('ascii'))
-        time.sleep(1)
+        time.sleep(0.5)
         resp = self.tn.read_until(flag, 1).decode('ascii', errors='ignore').strip()
         self.logger.debug("run cmd:" + cmd.strip() + ", return:" + resp)
         return resp
@@ -196,6 +197,22 @@ class TelnetClient:
         # print(cmd)
         resp = self.execute_cmd(b'\n', cmd + "\n")
         self.logger.info("Set channel (%s) %s as value %s, return: %s" % (ch, tp, val, resp))
+        return True
+
+    def autorun(self, ch: str, step: int, duration: int):
+        if ch.lower() == "a":
+            cmd = "apd "
+        elif ch.lower() == "b":
+            cmd = "bpd "
+        else:
+            self.logger.error("Error channel value: %s" % ch)
+            return False
+        for i in range(0, 20000, step):
+            delay_cmd = cmd + str(i)
+            resp = self.execute_cmd(b'\n', delay_cmd + "\n")
+            self.logger.info("Set channel (%s) delay as %s us, return: %s" % (ch, i, resp))
+            sys.stdout.flush()
+            time.sleep(duration)
         return True
 
 

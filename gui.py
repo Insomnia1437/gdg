@@ -75,26 +75,37 @@ class GdgGUI:
         ], title='Channel (delay_A, width_A, delay_B, width_B)')
 
         gdg_set_layout = sg.Frame(layout=[
-            [sg.Frame(layout=[[sg.Radio('A', 'out_ch', key=key_ch[0], default=True), sg.Radio('B', 'out_ch', key=key_ch[1])]],
-                      title='Output Channel'),
-             sg.Frame(
-                 layout=[[sg.Radio('None', 'out_type', key=key_type[0], default=True), sg.Radio('Delay', 'out_type', key=key_type[1]),
-                          sg.Radio('Width', 'out_type', key=key_type[2]),
-                          sg.Input('000', key='inp_val',
-                                   tooltip='delay value is between 0.1 ~ 15999999.9 us, pulse width is 0.1 us ~ 10 s')]],
-                 title='Output Type')],
+            [sg.Frame(
+                layout=[[sg.Radio('A', 'out_ch', key=key_ch[0], default=True), sg.Radio('B', 'out_ch', key=key_ch[1])]],
+                title='Output Channel'),
+                sg.Frame(
+                    layout=[[sg.Radio('None', 'out_type', key=key_type[0], default=True),
+                             sg.Radio('Delay', 'out_type', key=key_type[1]),
+                             sg.Radio('Width', 'out_type', key=key_type[2]),
+                             sg.Input('000', key='inp_val',
+                                      tooltip='delay value is between 0.1 ~ 15999999.9 us, pulse width is 0.1 us ~ 10 s')]],
+                    title='Output Type')],
             [sg.Frame(
                 layout=[
-                    [sg.Radio('None', 'out_mode', key=key_mode[0], default=True), sg.Radio('First', 'out_mode', key=key_mode[1]),
+                    [sg.Radio('None', 'out_mode', key=key_mode[0], default=True),
+                     sg.Radio('First', 'out_mode', key=key_mode[1]),
                      sg.Radio('Last', 'out_mode', key=key_mode[2])]],
-                title='Trigger Mode'),
+                title='Trigger Mode', tooltip='Do not select multi options!'),
                 sg.Frame(layout=[
-                    [sg.Radio('None', 'out_ctrl', key=key_ctrl[0], default=True), sg.Radio('enable', 'out_ctrl', key=key_ctrl[1]),
+                    [sg.Radio('None', 'out_ctrl', key=key_ctrl[0], default=True),
+                     sg.Radio('enable', 'out_ctrl', key=key_ctrl[1]),
                      sg.Radio('disable', 'out_ctrl', key=key_ctrl[2])]],
-                    title='Output Control'),
+                    title='Output Control', tooltip='Do not select multi options!'),
                 sg.Button('Write', button_color=('white', 'blue'), border_width=5, size=(8, 2),
-                          font=("Helvetica", 8), key='write')]
-        ], title='GDG Delay Setting', tooltip='Do not select multi options!')
+                          font=("Helvetica", 8), key='write')],
+            [sg.Frame(layout=[
+                [sg.Text('Step (us)'),
+                 sg.Input('', key='inp_step', size=(10, 1)), sg.Text('duration (sec)'),
+                 sg.Input('', key='inp_duration', size=(10, 1)),
+                 sg.Button('Autorun', button_color=('white', 'blue'), border_width=4, size=(8, 1),
+                           font=("Helvetica", 8), key='autorun')]
+            ], title='Auto Run')]
+        ], title='GDG Delay Setting')
 
         layout = [[sg.Menu(menu_def, background_color='white')],
                   [server_layout],
@@ -192,6 +203,17 @@ class GdgGUI:
                 if not selected_ctrl == key_ctrl[0]:
                     if client.set_control(selected_ch, selected_ctrl):
                         sg.popup_ok("Set output control success!")
+            if event == 'autorun':
+                if not self.connected:
+                    sg.popup_error("please connect to a host first!")
+                    continue
+                if not host:
+                    sg.popup_error("no host founded")
+                    continue
+                selected_ch = [k for k in key_ch if values[k]][0]
+                inp_step = int(values['inp_step'])
+                inp_duration = int(values['inp_duration'])
+                client.autorun(selected_ch, inp_step, inp_duration)
             if event == 'version':
                 self.info_popup()
             # Poll queue
