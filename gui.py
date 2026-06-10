@@ -51,72 +51,82 @@ class GdgGUI:
         self.connected = False
 
     def create_widget(self):
-        # sg.theme('Reddit')
-        # sg.theme('GreenTan')
-        sg.theme('lightgreen1')
+        # Use a light theme and larger, readable system font
+        sg.theme('LightGrey1')
+        sg.set_options(font=('Segoe UI', 14))
         # define menu
         menu_def = [['&Help', 'version']]
-        host_layout = [sg.Radio(k, group_id='hosts', key=k, tooltip=v) for k, v in GDG_MACHINES.items()]
-        host_layout.insert(0, sg.Radio('None', group_id='hosts', key='host_none'))
-        server_layout = sg.Frame(layout=[host_layout,
-                                         [sg.Text('Others: input hostname or IP'),
-                                          sg.Input('', key='inp_host', size=(20, 1)),
-                                          sg.Button('Connect', key='connect'),
-                                          sg.Text('not connected...', background_color='gray', text_color='blue',
-                                                  key='connected', size=(20, 1)),
-                                          sg.Button('Disconnect', key='disconnect')]
-                                         ], title='GDG connection)')
-        channel_read_layout = sg.Frame(layout=[
-            [sg.Text('Current delay and width'),
-             sg.Text('00000000.0, 00000000.0, 00000000.0, 00000000.0', key='output_val', text_color='red', size=(56, 1),
-                     background_color='gray'),
-             sg.Button('Read', key='read'),
-             ]
-        ], title='Channel (delay_A, width_A, delay_B, width_B)')
 
-        gdg_set_layout = sg.Frame(layout=[
-            [sg.Frame(
-                layout=[[sg.Radio('A', 'out_ch', key=key_ch[0], default=True), sg.Radio('B', 'out_ch', key=key_ch[1])]],
-                title='Output Channel'),
-                sg.Frame(
-                    layout=[[sg.Radio('None', 'out_type', key=key_type[0], default=True),
-                             sg.Radio('Delay', 'out_type', key=key_type[1]),
-                             sg.Radio('Width', 'out_type', key=key_type[2]),
-                             sg.Input('000', key='inp_val',
-                                      tooltip='delay value is between 0.1 ~ 15999999.9 us, pulse width is 0.1 us ~ 10 s')]],
-                    title='Output Type')],
-            [sg.Frame(
-                layout=[
-                    [sg.Radio('None', 'out_mode', key=key_mode[0], default=True),
-                     sg.Radio('First', 'out_mode', key=key_mode[1]),
-                     sg.Radio('Last', 'out_mode', key=key_mode[2])]],
-                title='Trigger Mode', tooltip='Do not select multi options!'),
-                sg.Frame(layout=[
-                    [sg.Radio('None', 'out_ctrl', key=key_ctrl[0], default=True),
-                     sg.Radio('enable', 'out_ctrl', key=key_ctrl[1]),
-                     sg.Radio('disable', 'out_ctrl', key=key_ctrl[2])]],
-                    title='Output Control', tooltip='Do not select multi options!'),
-                sg.Button('Write', button_color=('white', 'blue'), border_width=5, size=(8, 2),
-                          font=("Helvetica", 8), key='write')],
-            [sg.Frame(layout=[
-                [sg.Text('Step (us)'),
-                 sg.Input('', key='inp_step', size=(10, 1)), sg.Text('duration (sec)'),
-                 sg.Input('', key='inp_duration', size=(10, 1)),
-                 sg.Button('Autorun', button_color=('white', 'blue'), border_width=4, size=(8, 1),
-                           font=("Helvetica", 8), key='autorun')]
-            ], title='Auto Run')]
-        ], title='GDG Delay Setting')
+        # Host selection column (compact list + manual input)
+        host_radios = [[sg.Radio('None', 'hosts', key='host_none', default=True)]]
+        # split radios into multiple columns for better visual density
+        radios = [sg.Radio(k, 'hosts', key=k, tooltip=v) for k, v in GDG_MACHINES.items()]
+        # chunk radios into rows of 3
+        row = []
+        for i, r in enumerate(radios, 1):
+            row.append(r)
+            if i % 3 == 0:
+                host_radios.append(row)
+                row = []
+        if row:
+            host_radios.append(row)
 
-        layout = [[sg.Menu(menu_def, background_color='white')],
-                  [server_layout],
-                  [channel_read_layout],
-                  [gdg_set_layout],
-                  [sg.Frame(title='Log', layout=[
-                      [sg.ML(key='out_log', size=(120, 7),
-                             text_color='red')]
-                  ])],
-                  [sg.Button('Exit')]]
-        return sg.Window(self.title, layout=layout)
+        connection_col = sg.Column([
+            [sg.Text('GDG Hosts', font=('Segoe UI', 12, 'bold'))],
+            *host_radios,
+            [sg.Text('Other host / IP:'), sg.Input('', key='inp_host', size=(18, 1))],
+            [sg.Button('Connect', key='connect', size=(10, 1), button_color=('white', '#007ACC')), 
+             sg.Button('Disconnect', key='disconnect', size=(10, 1))],
+            [sg.Text('Status:'), sg.Text('not connected...', key='connected', size=(28, 1), text_color='#007700')]
+        ], vertical_alignment='top', background_color='white')
+
+        # Channel read/display
+        channel_col = sg.Column([
+            [sg.Text('Current (delay_A, width_A, delay_B, width_B)', font=('Segoe UI', 13, 'bold'))],
+            [sg.Multiline('00000000.0, 00000000.0, 00000000.0, 00000000.0', key='output_val', size=(60, 2),
+                          disabled=True, text_color='#B22222', background_color='white')],
+            [sg.Button('Read', key='read', size=(10, 1))]
+        ], vertical_alignment='top', background_color='white')
+
+        # GDG setting controls
+        channel_frame = sg.Frame(title='Output Channel', layout=[[sg.Radio('A', 'out_ch', key=key_ch[0], default=True),
+                                                                  sg.Radio('B', 'out_ch', key=key_ch[1])]])
+        type_frame = sg.Frame(title='Output Type', layout=[[sg.Radio('None', 'out_type', key=key_type[0], default=True),
+                                                            sg.Radio('Delay', 'out_type', key=key_type[1]),
+                                                            sg.Radio('Width', 'out_type', key=key_type[2]),
+                                                            sg.Input('000', key='inp_val', size=(12, 1),
+                                                                     tooltip='delay: 0.1 ~ 15999999.9 us; width: 0.1 us ~ 10 s')]])
+
+        mode_frame = sg.Frame(title='Trigger Mode', layout=[[sg.Radio('None', 'out_mode', key=key_mode[0], default=True),
+                                                              sg.Radio('First', 'out_mode', key=key_mode[1]),
+                                                              sg.Radio('Last', 'out_mode', key=key_mode[2])]], tooltip='Choose one')
+        ctrl_frame = sg.Frame(title='Output Control', layout=[[sg.Radio('None', 'out_ctrl', key=key_ctrl[0], default=True),
+                                                               sg.Radio('enable', 'out_ctrl', key=key_ctrl[1]),
+                                                               sg.Radio('disable', 'out_ctrl', key=key_ctrl[2])]], tooltip='Choose one')
+
+        settings_col = sg.Column([
+            [channel_frame, type_frame],
+            [mode_frame, ctrl_frame, sg.Button('Write', key='write', size=(10, 1), button_color=('white', '#007ACC'))],
+            [sg.Frame(title='Auto Run', layout=[[sg.Text('Step (us)'), sg.Input('', key='inp_step', size=(10, 1)),
+                                               sg.Text('Duration (s)'), sg.Input('', key='inp_duration', size=(10, 1)),
+                                               sg.Button('Autorun', key='autorun', size=(10, 1), button_color=('white', '#007ACC'))]])]
+        ], vertical_alignment='top')
+        settings_col.BackgroundColor = 'white'
+
+        # Log area
+        log_col = sg.Frame(title='Log', layout=[[sg.Multiline('', key='out_log', size=(100, 10), disabled=True,
+                               autoscroll=True, text_color='#B22222', background_color='white')]], element_justification='left')
+
+        layout = [
+            [sg.Menu(menu_def, background_color='white', tearoff=False)],
+            [connection_col, sg.VerticalSeparator(), channel_col],
+            [sg.HorizontalSeparator()],
+            [settings_col],
+            [log_col],
+            [sg.Push(), sg.Button('Exit', size=(8, 1))]
+        ]
+
+        return sg.Window(self.title, layout=layout, finalize=True, resizable=True, background_color='white')
 
     def info_popup(self):
         ver_string = self.author + self.user + self.pid + self.hostname + self.display + \

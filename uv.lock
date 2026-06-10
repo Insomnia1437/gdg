@@ -1,0 +1,23 @@
+version = 1
+revision = 3
+requires-python = "==3.12.*"
+
+[[package]]
+name = "gdg"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "pysimplegui" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pysimplegui", specifier = ">=6.0" }]
+
+[[package]]
+name = "pysimplegui"
+version = "6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/00/cf5e10d2842108f9295c7399960a4266e480eaa385729460cb52112340de/pysimplegui-6.0.tar.gz", hash = "sha256:508fa715a4fecdcde5d74b20bf473151bc5d57588b9851cc9d781519c3fbd87d", size = 477915, upload-time = "2026-04-14T16:16:24.764Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/7d/17747200055182aeeac2a7f508adf968cb3ef08595480a030c7e828e285c/pysimplegui-6.0-py3-none-any.whl", hash = "sha256:cc3f0dbdb0f21452a366794be7e0e26d842b3f3a7cb5580e403680d4183151f2", size = 479810, upload-time = "2026-04-14T16:16:23.589Z" },
+]
