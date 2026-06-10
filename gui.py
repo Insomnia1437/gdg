@@ -126,7 +126,26 @@ class GdgGUI:
             [sg.Push(), sg.Button('Exit', size=(8, 1))]
         ]
 
-        return sg.Window(self.title, layout=layout, finalize=True, resizable=True, background_color='white')
+        # create window with a fixed size and center it to avoid tiling WMs forcing fullscreen
+        win = sg.Window(self.title, layout=layout, finalize=True, resizable=False, background_color='white')
+        try:
+            tk = win.TKroot
+            # Hint the window manager to treat this as a dialog/utility window (may make it float)
+            try:
+                tk.wm_attributes("-type", "dialog")
+            except Exception:
+                pass
+            # set a sensible fixed size and center on screen
+            width, height = 1100, 800
+            sw = tk.winfo_screenwidth()
+            sh = tk.winfo_screenheight()
+            x = int((sw - width) / 2)
+            y = int((sh - height) / 2)
+            tk.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            # final fallback: ignore if TKroot not available or attributes unsupported
+            pass
+        return win
 
     def info_popup(self):
         ver_string = self.author + self.user + self.pid + self.hostname + self.display + \
