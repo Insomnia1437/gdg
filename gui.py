@@ -8,6 +8,9 @@ import os
 import sys
 from datetime import datetime
 import queue
+import re
+import time
+import threading
 import PySimpleGUI as sg
 from telnet import gdg_tn
 
@@ -43,12 +46,20 @@ class GdgGUI:
             self.user = "user = %s\n" % (os.environ["LOGNAME"])
             self.display = "display = %s\n" % (os.environ["DISPLAY"])
         except KeyError:
-            self.hostname = "hostname = ?\n"
-            self.user = "user = ?\n"
-            self.display = "display = ?\n"
+            self.hostname = "hostname = ?"
+            self.user = "user = ?"
+            self.display = "display = ?"
 
         self.window = self.create_widget()
         self.connected = False
+        self.connection_in_progress = False
+        self.ramp_running = False
+        self.autorun_running = False
+        self.ramp_thread = None
+        self.ramp_stop_event = threading.Event()
+        self.autorun_thread = None
+        self.autorun_stop_event = threading.Event()
+        self.connect_thread = None
 
     def create_widget(self):
         # Use a light theme and larger, readable system font
@@ -75,7 +86,7 @@ class GdgGUI:
             [sg.Text('GDG Hosts', font=('Segoe UI', 12, 'bold'))],
             *host_radios,
             [sg.Text('Other host / IP:'), sg.Input('', key='inp_host', size=(18, 1))],
-            [sg.Button('Connect', key='connect', size=(10, 1), button_color=('white', '#007ACC')), 
+            [sg.Button('Connect', key='connect', size=(10, 1), button_color=('white', '#007ACC')),
              sg.Button('Disconnect', key='disconnect', size=(10, 1))],
             [sg.Text('Status:'), sg.Text('not connected...', key='connected', size=(28, 1), text_color='#007700')]
         ], vertical_alignment='top', background_color='white')
@@ -85,6 +96,12 @@ class GdgGUI:
             [sg.Text('Current (delay_A, width_A, delay_B, width_B)', font=('Segoe UI', 13, 'bold'))],
             [sg.Multiline('00000000.0, 00000000.0, 00000000.0, 00000000.0', key='output_val', size=(60, 2),
                           disabled=True, text_color='#B22222', background_color='white')],
+            [sg.Frame('Parsed Status Monitor', [
+                [sg.Text('Ch A Delay (us):'), sg.Input('0.0', key='status_delay_a', size=(12, 1), readonly=True, text_color='#B22222', background_color='white'),
+                 sg.Text('Ch A Width (us):'), sg.Input('0.0', key='status_width_a', size=(12, 1), readonly=True, text_color='#B22222', background_color='white')],
+                [sg.Text('Ch B Delay (us):'), sg.Input('0.0', key='status_delay_b', size=(12, 1), readonly=True, text_color='#B22222', background_color='white'),
+                 sg.Text('Ch B Width (us):'), sg.Input('0.0', key='status_width_b', size=(12, 1), readonly=True, text_color='#B22222', background_color='white')]
+            ], background_color='white')],
             [sg.Button('Read', key='read', size=(10, 1))]
         ], vertical_alignment='top', background_color='white')
 
@@ -107,9 +124,21 @@ class GdgGUI:
         settings_col = sg.Column([
             [channel_frame, type_frame],
             [mode_frame, ctrl_frame, sg.Button('Write', key='write', size=(10, 1), button_color=('white', '#007ACC'))],
-            [sg.Frame(title='Auto Run', layout=[[sg.Text('Step (us)'), sg.Input('', key='inp_step', size=(10, 1)),
-                                               sg.Text('Duration (s)'), sg.Input('', key='inp_duration', size=(10, 1)),
-                                               sg.Button('Autorun', key='autorun', size=(10, 1), button_color=('white', '#007ACC'))]])]
+            [sg.Frame(title='Auto Run Sweep', layout=[
+                [sg.Text('Start (us)'), sg.Input('0', key='inp_autorun_start', size=(8, 1)),
+                 sg.Text('End (us)'), sg.Input('20000', key='inp_autorun_end', size=(8, 1)),
+                 sg.Text('Step (us)'), sg.Input('', key='inp_step', size=(8, 1)),
+                 sg.Text('Interval (s)'), sg.Input('', key='inp_interval', size=(8, 1))],
+                [sg.Button('Start Sweep', key='autorun', size=(12, 1), button_color=('white', '#007ACC')),
+                 sg.Button('Stop Sweep', key='stop_autorun', size=(12, 1), button_color=('white', '#CC3333'), disabled=True)]
+            ])],
+            [sg.Frame(title='Gradual Delay Control', layout=[
+                [sg.Text('Target (us)'), sg.Input('', key='inp_target_delay', size=(10, 1)),
+                 sg.Text('Step (us)'), sg.Input('', key='inp_ramp_step', size=(10, 1)),
+                 sg.Text('Interval (s)'), sg.Input('', key='inp_ramp_interval', size=(10, 1))],
+                [sg.Button('Start Ramp', key='start_ramp', size=(12, 1), button_color=('white', '#007ACC')),
+                 sg.Button('Stop Ramp', key='stop_ramp', size=(12, 1), button_color=('white', '#CC3333'), disabled=True)]
+            ])]
         ], vertical_alignment='top')
         settings_col.BackgroundColor = 'white'
 
@@ -159,13 +188,198 @@ class GdgGUI:
         else:
             self.window['connected'].update('not connected...')
 
+    def update_control_states(self):
+        # Enabled only when connected and no thread is active
+        enabled = self.connected
+        any_active = self.ramp_running or self.autorun_running or self.connection_in_progress
+
+        # Connect / Disconnect buttons
+        self.window['connect'].update(disabled=self.connected or any_active)
+        self.window['disconnect'].update(disabled=not self.connected or any_active)
+
+        # Read & Write control panels
+        self.window['read'].update(disabled=not enabled or any_active)
+        self.window['write'].update(disabled=not enabled or any_active)
+
+        # Settings Inputs & Radio controls
+        for k in key_ch + key_type + key_mode + key_ctrl + ['inp_val']:
+            self.window[k].update(disabled=not enabled or any_active)
+
+        # Auto Run Controls
+        self.window['inp_autorun_start'].update(disabled=not enabled or any_active)
+        self.window['inp_autorun_end'].update(disabled=not enabled or any_active)
+        self.window['inp_step'].update(disabled=not enabled or any_active)
+        self.window['inp_interval'].update(disabled=not enabled or any_active)
+        self.window['autorun'].update(disabled=not enabled or any_active)
+        self.window['stop_autorun'].update(disabled=not enabled or not self.autorun_running)
+
+        # Gradual Ramp Controls
+        self.window['inp_target_delay'].update(disabled=not enabled or any_active)
+        self.window['inp_ramp_step'].update(disabled=not enabled or any_active)
+        self.window['inp_ramp_interval'].update(disabled=not enabled or any_active)
+        self.window['start_ramp'].update(disabled=not enabled or any_active)
+        self.window['stop_ramp'].update(disabled=not enabled or not self.ramp_running)
+
+    def execute_connect(self, client, host):
+        success = client.connect(host)
+        self.window.write_event_value('-CONNECT_FINISHED-', (host, success))
+
+    def execute_autorun(self, client, ch, start, end, step, interval):
+        client.logger.info(f"Start auto sweep for channel {ch.upper()}: {start} us -> {end} us (step: {step} us, interval: {interval} s)")
+        current = start
+        try:
+            if start <= end:
+                while current <= end:
+                    if self.autorun_stop_event.is_set():
+                        client.logger.info("Sweep cancelled by user.")
+                        break
+                    val_str = f"{current:.1f}"
+                    if not client.set_delay(ch, "delay", val_str):
+                        client.logger.error(f"Failed to set delay to {val_str} us. Aborting sweep.")
+                        break
+
+                    slept = 0.0
+                    while slept < interval:
+                        if self.autorun_stop_event.is_set():
+                            break
+                        time.sleep(0.05)
+                        slept += 0.05
+
+                    if current == end:
+                        break
+                    current = min(current + step, end)
+            else:
+                while current >= end:
+                    if self.autorun_stop_event.is_set():
+                        client.logger.info("Sweep cancelled by user.")
+                        break
+                    val_str = f"{current:.1f}"
+                    if not client.set_delay(ch, "delay", val_str):
+                        client.logger.error(f"Failed to set delay to {val_str} us. Aborting sweep.")
+                        break
+
+                    slept = 0.0
+                    while slept < interval:
+                        if self.autorun_stop_event.is_set():
+                            break
+                        time.sleep(0.05)
+                        slept += 0.05
+
+                    if current == end:
+                        break
+                    current = max(current - step, end)
+
+            if not self.autorun_stop_event.is_set():
+                client.logger.info(f"Auto sweep completed successfully at {end:.1f} us.")
+        except Exception as e:
+            client.logger.error(f"Error in sweep thread: {str(e)}")
+        finally:
+            self.window.write_event_value('-AUTORUN_FINISHED-', None)
+
+    def parse_and_update_status_monitor(self, resp):
+        if not resp:
+            return
+        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', resp)
+        if len(numbers) >= 4:
+            try:
+                self.window['status_delay_a'].update(f"{float(numbers[0]):.1f}")
+                self.window['status_width_a'].update(f"{float(numbers[1]):.1f}")
+                self.window['status_delay_b'].update(f"{float(numbers[2]):.1f}")
+                self.window['status_width_b'].update(f"{float(numbers[3]):.1f}")
+            except ValueError:
+                pass
+
+    def get_current_delay(self, client, ch):
+        """
+        Queries current settings via client.read_all() and parses the delay
+        for the selected channel (A or B).
+        """
+        resp = client.read_all()
+        if not resp:
+            return None
+        self.parse_and_update_status_monitor(resp)
+        # Extract all float or integer numbers
+        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', resp)
+        if len(numbers) < 4:
+            client.logger.error("Could not parse enough parameters from read_all response: '%s'" % resp)
+            return None
+
+        try:
+            if ch.lower() == 'a':
+                return float(numbers[0])
+            elif ch.lower() == 'b':
+                return float(numbers[2])
+            else:
+                client.logger.error("Invalid channel: %s" % ch)
+                return None
+        except (ValueError, IndexError) as e:
+            client.logger.error("Error parsing delay values: %s" % str(e))
+            return None
+
+    def execute_ramp(self, client, ch, start, target, step, interval):
+        """
+        Background thread target that incrementally steps the delay value
+        from 'start' to 'target' with 'step' increment and 'interval' seconds.
+        """
+        current = start
+        client.logger.info(f"Start gradual delay ramp for channel {ch.upper()}: {start} us -> {target} us (step: {step} us, interval: {interval} s)")
+
+        try:
+            if start < target:
+                while current < target:
+                    if self.ramp_stop_event.is_set():
+                        client.logger.info("Ramping cancelled by user.")
+                        break
+                    current = min(current + step, target)
+                    val_str = f"{current:.1f}"
+                    if not client.set_delay(ch, "delay", val_str):
+                        client.logger.error(f"Failed to set delay to {val_str} us. Aborting ramp.")
+                        break
+
+                    # Sleep in small chunks to check the cancellation event frequently
+                    slept = 0.0
+                    while slept < interval:
+                        if self.ramp_stop_event.is_set():
+                            break
+                        time.sleep(0.05)
+                        slept += 0.05
+            else:
+                while current > target:
+                    if self.ramp_stop_event.is_set():
+                        client.logger.info("Ramping cancelled by user.")
+                        break
+                    current = max(current - step, target)
+                    val_str = f"{current:.1f}"
+                    if not client.set_delay(ch, "delay", val_str):
+                        client.logger.error(f"Failed to set delay to {val_str} us. Aborting ramp.")
+                        break
+
+                    slept = 0.0
+                    while slept < interval:
+                        if self.ramp_stop_event.is_set():
+                            break
+                        time.sleep(0.05)
+                        slept += 0.05
+
+            if not self.ramp_stop_event.is_set() and current == target:
+                client.logger.info(f"Gradual delay ramp completed successfully at {target:.1f} us.")
+        except Exception as e:
+            client.logger.error(f"Error in ramping thread: {str(e)}")
+        finally:
+            self.window.write_event_value('-RAMP_FINISHED-', None)
+
     def run(self):
         client = gdg_tn.TelnetClient(debug=False)
         # client.connect()
         host = None
+        # Initialize dynamic control states based on connection status (initially disconnected)
+        self.update_control_states()
+
         while True:
             event, values = self.window.read(timeout=100)
             if event in ('Exit', None):
+                self.ramp_stop_event.set()
+                self.autorun_stop_event.set()
                 break
             if event == 'connect':
                 if host:
@@ -181,12 +395,37 @@ class GdgGUI:
                         sg.popup_error('please select a host or input one!')
                         continue
                     host = inp_host
-                if client.connect(host):
-                    client.logger.info("connect to " + host)
+
+                # Start connection in a background thread to prevent UI freezing
+                self.connection_in_progress = True
+                self.window['connected'].update('Connecting...')
+                self.update_control_states()
+                self.connect_thread = threading.Thread(
+                    target=self.execute_connect,
+                    args=(client, host),
+                    daemon=True
+                )
+                self.connect_thread.start()
+
+            if event == '-CONNECT_FINISHED-':
+                self.connection_in_progress = False
+                res_host, success = values['-CONNECT_FINISHED-']
+                if success:
+                    client.logger.info("connect to " + res_host)
                     self.connected = True
-                    self.set_connected(host)
+                    self.set_connected(res_host)
+                    # Fetch initial parameters
+                    resp = client.read_all()
+                    if resp != "":
+                        self.window['output_val'].update(resp)
+                        self.parse_and_update_status_monitor(resp)
                 else:
-                    sg.popup_error("Error when connecting to host %s" % host)
+                    sg.popup_error("Error when connecting to host %s" % res_host)
+                    self.connected = False
+                    self.set_connected(None)
+                    host = None
+                self.update_control_states()
+
             if event == 'disconnect':
                 if not host:
                     sg.popup_error("already disconnected!")
@@ -196,6 +435,14 @@ class GdgGUI:
                 host = None
                 self.connected = False
                 self.set_connected(host)
+                # Reset parsed monitor widgets
+                self.window['status_delay_a'].update('0.0')
+                self.window['status_width_a'].update('0.0')
+                self.window['status_delay_b'].update('0.0')
+                self.window['status_width_b'].update('0.0')
+                self.window['output_val'].update('00000000.0, 00000000.0, 00000000.0, 00000000.0')
+                self.update_control_states()
+
             if event == 'read':
                 if not self.connected:
                     sg.popup_error("please connect to a host first!")
@@ -204,11 +451,12 @@ class GdgGUI:
                     sg.popup_error("no host founded")
                     continue
                 resp = client.read_all()
-                # resp = "test"
                 if resp == "":
                     client.logger.error("Return empty string from host")
                 else:
                     self.window['output_val'].update(resp)
+                    self.parse_and_update_status_monitor(resp)
+
             if event == 'write':
                 if not self.connected:
                     sg.popup_error("please connect to a host first!")
@@ -221,8 +469,6 @@ class GdgGUI:
                 selected_md = [k for k in key_mode if values[k]][0]
                 selected_ctrl = [k for k in key_ctrl if values[k]][0]
                 inp_val = values['inp_val']
-                # client.logger.info(
-                #     "selected %s %s %s %s %s" % (selected_ch, selected_tp, selected_md, selected_ctrl, inp_val))
                 if not selected_tp == key_type[0]:
                     if client.set_delay(selected_ch, selected_tp, inp_val):
                         sg.popup_ok("Set delay success!")
@@ -232,6 +478,12 @@ class GdgGUI:
                 if not selected_ctrl == key_ctrl[0]:
                     if client.set_control(selected_ch, selected_ctrl):
                         sg.popup_ok("Set output control success!")
+                # Refresh status monitor display after write
+                resp = client.read_all()
+                if resp != "":
+                    self.window['output_val'].update(resp)
+                    self.parse_and_update_status_monitor(resp)
+
             if event == 'autorun':
                 if not self.connected:
                     sg.popup_error("please connect to a host first!")
@@ -239,10 +491,153 @@ class GdgGUI:
                 if not host:
                     sg.popup_error("no host founded")
                     continue
+
+                # Retrieve and validate sweep bounds
+                try:
+                    start_val_str = values['inp_autorun_start']
+                    if not start_val_str:
+                        raise ValueError("Start delay cannot be empty")
+                    sweep_start = float(start_val_str)
+                    if not (0.1 <= sweep_start <= 15999999.9):
+                        raise ValueError("Start delay must be between 0.1 and 15999999.9 us")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Sweep Start: {str(e)}")
+                    continue
+
+                try:
+                    end_val_str = values['inp_autorun_end']
+                    if not end_val_str:
+                        raise ValueError("End delay cannot be empty")
+                    sweep_end = float(end_val_str)
+                    if not (0.1 <= sweep_end <= 15999999.9):
+                        raise ValueError("End delay must be between 0.1 and 15999999.9 us")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Sweep End: {str(e)}")
+                    continue
+
+                try:
+                    step_val_str = values['inp_step']
+                    if not step_val_str:
+                        raise ValueError("Step cannot be empty")
+                    sweep_step = float(step_val_str)
+                    if sweep_step <= 0:
+                        raise ValueError("Step must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Sweep Step: {str(e)}")
+                    continue
+
+                try:
+                    interval_val_str = values['inp_interval']
+                    if not interval_val_str:
+                        raise ValueError("Interval cannot be empty")
+                    sweep_interval = float(interval_val_str)
+                    if sweep_interval <= 0:
+                        raise ValueError("Interval must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Sweep Interval: {str(e)}")
+                    continue
+
                 selected_ch = [k for k in key_ch if values[k]][0]
-                inp_step = int(values['inp_step'])
-                inp_duration = int(values['inp_duration'])
-                client.autorun(selected_ch, inp_step, inp_duration)
+
+                self.autorun_running = True
+                self.update_control_states()
+                self.autorun_stop_event.clear()
+                self.autorun_thread = threading.Thread(
+                    target=self.execute_autorun,
+                    args=(client, selected_ch, sweep_start, sweep_end, sweep_step, sweep_interval),
+                    daemon=True
+                )
+                self.autorun_thread.start()
+
+            if event == 'stop_autorun':
+                self.autorun_stop_event.set()
+                client.logger.info("Requesting to stop auto sweep...")
+
+            if event == '-AUTORUN_FINISHED-':
+                self.autorun_running = False
+                self.update_control_states()
+                resp = client.read_all()
+                if resp != "":
+                    self.window['output_val'].update(resp)
+                    self.parse_and_update_status_monitor(resp)
+
+            if event == 'start_ramp':
+                if not self.connected:
+                    sg.popup_error("please connect to a host first!")
+                    continue
+                if not host:
+                    sg.popup_error("no host founded")
+                    continue
+
+                # Retrieve and validate inputs
+                try:
+                    target_val_str = values['inp_target_delay']
+                    if not target_val_str:
+                        raise ValueError("Target delay cannot be empty")
+                    target_delay = float(target_val_str)
+                    if not (0.1 <= target_delay <= 15999999.9):
+                        raise ValueError("Target delay must be between 0.1 and 15999999.9 us")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Target Delay: {str(e)}")
+                    continue
+
+                try:
+                    step_val_str = values['inp_ramp_step']
+                    if not step_val_str:
+                        raise ValueError("Step cannot be empty")
+                    ramp_step = float(step_val_str)
+                    if ramp_step <= 0:
+                        raise ValueError("Step must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Step: {str(e)}")
+                    continue
+
+                try:
+                    interval_val_str = values['inp_ramp_interval']
+                    if not interval_val_str:
+                        raise ValueError("Interval cannot be empty")
+                    ramp_interval = float(interval_val_str)
+                    if ramp_interval <= 0:
+                        raise ValueError("Interval must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Interval: {str(e)}")
+                    continue
+
+                selected_ch = [k for k in key_ch if values[k]][0]
+
+                # Fetch current delay value of selected channel
+                start_delay = self.get_current_delay(client, selected_ch)
+                if start_delay is None:
+                    sg.popup_error("Failed to query the current delay from the device. Please verify connection and retry.")
+                    continue
+
+                if start_delay == target_delay:
+                    client.logger.info("Current delay is already at the target delay. No ramping needed.")
+                    continue
+
+                self.ramp_running = True
+                self.update_control_states()
+
+                # Start ramping thread
+                self.ramp_stop_event.clear()
+                self.ramp_thread = threading.Thread(
+                    target=self.execute_ramp,
+                    args=(client, selected_ch, start_delay, target_delay, ramp_step, ramp_interval),
+                    daemon=True
+                )
+                self.ramp_thread.start()
+
+            if event == 'stop_ramp':
+                self.ramp_stop_event.set()
+                client.logger.info("Requesting to stop ramping...")
+
+            if event == '-RAMP_FINISHED-':
+                self.ramp_running = False
+                self.update_control_states()
+                resp = client.read_all()
+                if resp != "":
+                    self.window['output_val'].update(resp)
+                    self.parse_and_update_status_monitor(resp)
             if event == 'version':
                 self.info_popup()
             # Poll queue
