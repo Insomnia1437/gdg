@@ -31,13 +31,6 @@ key_mode = ['md_none', 'first', 'last']
 key_ctrl = ['ct_none', 'enable', 'disable']
 
 
-def escape_control_chars(s: str) -> str:
-    if not s:
-        return ""
-    return "".join(
-        f"\\x{ord(c):02x}" if (ord(c) < 32 and c not in '\r\n\t') or ord(c) >= 127 else c
-        for c in s
-    )
 
 
 class GdgGUI:
@@ -361,7 +354,7 @@ class GdgGUI:
         cleaned_resp = "".join(c for c in resp if 32 <= ord(c) < 127 or c in '\r\n\t')
         numbers = re.findall(r'[-+]?\d*\.\d+|\d+', cleaned_resp)
         if len(numbers) < 4:
-            client.logger.error("Could not parse enough parameters from read_all response: '%s'" % escape_control_chars(resp))
+            client.logger.error("Could not parse enough parameters from read_all response: '%s'" % resp)
             return None
 
         try:
@@ -516,7 +509,7 @@ class GdgGUI:
                     # Fetch initial parameters
                     resp = client.read_all()
                     if resp != "":
-                        self.window['output_val'].update(escape_control_chars(resp))
+                        self.window['output_val'].update(resp)
                         self.parse_and_update_status_monitor(resp)
                 else:
                     sg.popup_error("Error when connecting to host %s" % res_host)
@@ -553,7 +546,7 @@ class GdgGUI:
                 if resp == "":
                     client.logger.error("Return empty string from host")
                 else:
-                    self.window['output_val'].update(escape_control_chars(resp))
+                    self.window['output_val'].update(resp)
                     self.parse_and_update_status_monitor(resp)
 
             if event == 'write':
@@ -580,7 +573,7 @@ class GdgGUI:
                 # Refresh status monitor display after write
                 resp = client.read_all()
                 if resp != "":
-                    self.window['output_val'].update(escape_control_chars(resp))
+                    self.window['output_val'].update(resp)
                     self.parse_and_update_status_monitor(resp)
 
             if event == 'autorun':
@@ -683,7 +676,7 @@ class GdgGUI:
                 self.update_control_states()
                 resp = client.read_all()
                 if resp != "":
-                    self.window['output_val'].update(escape_control_chars(resp))
+                    self.window['output_val'].update(resp)
                     self.parse_and_update_status_monitor(resp)
 
             if event == 'start_ramp':
@@ -787,13 +780,13 @@ class GdgGUI:
                 self.update_control_states()
                 resp = client.read_all()
                 if resp != "":
-                    self.window['output_val'].update(escape_control_chars(resp))
+                    self.window['output_val'].update(resp)
                     self.parse_and_update_status_monitor(resp)
             if event == 'version':
                 self.info_popup()
             if event == 'save_log':
                 log_content = self.window['out_log'].get()
-                default_filename = f"gdg_log_{int(time.time())}.log"
+                default_filename = f"gdg_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
                 filepath = sg.popup_get_file(
                     'Save Log File',
                     save_as=True,

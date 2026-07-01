@@ -24,15 +24,6 @@ class QueueHandler(logging.Handler):
         self.log_queue.put(record)
 
 
-class SafeFormatter(logging.Formatter):
-    def format(self, record):
-        formatted = super().format(record)
-        return "".join(
-            f"\\x{ord(c):02x}" if (ord(c) < 32 and c not in '\r\n\t') or ord(c) >= 127 else c
-            for c in formatted
-        )
-
-
 class TelnetClient:
     """
     GDG has two channels: A and B, both are able to change the delay and pulse width
@@ -72,15 +63,11 @@ class TelnetClient:
             logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT, datefmt=DATE_FORMAT)
         else:
             logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
-        
-        # Apply SafeFormatter to basicConfig root handlers as well
-        for handler in logging.root.handlers:
-            handler.setFormatter(SafeFormatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT))
 
         self.log_queue = queue.Queue()
         self.queue_handler = QueueHandler(self.log_queue)
         self.queue_handler.setFormatter(
-            SafeFormatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT))
+            logging.Formatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT))
         self.logger.addHandler(self.queue_handler)
 
     def connect(self, host, port=10001):
