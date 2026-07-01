@@ -31,6 +31,15 @@ key_mode = ['md_none', 'first', 'last']
 key_ctrl = ['ct_none', 'enable', 'disable']
 
 
+def escape_control_chars(s: str) -> str:
+    if not s:
+        return ""
+    return "".join(
+        f"\\x{ord(c):02x}" if (ord(c) < 32 and c not in '\r\n\t') or ord(c) >= 127 else c
+        for c in s
+    )
+
+
 class GdgGUI:
     def __init__(self):
         self.author = 'author = Di WANG\n'
@@ -129,6 +138,8 @@ class GdgGUI:
                  sg.Text('End (us)'), sg.Input('20000', key='inp_autorun_end', size=(8, 1)),
                  sg.Text('Step (us)'), sg.Input('', key='inp_step', size=(8, 1)),
                  sg.Text('Interval (s)'), sg.Input('', key='inp_interval', size=(8, 1))],
+                [sg.Text('Pause Every (us)'), sg.Input('', key='inp_pause_every', size=(8, 1), tooltip='Optional. Pause sweep after every N us increase/decrease'),
+                 sg.Text('Pause Time (s)'), sg.Input('', key='inp_pause_time', size=(8, 1), tooltip='Optional. Wait duration in seconds during pause')],
                 [sg.Button('Start Sweep', key='autorun', size=(12, 1), button_color=('white', '#007ACC')),
                  sg.Button('Stop Sweep', key='stop_autorun', size=(12, 1), button_color=('white', '#CC3333'), disabled=True)]
             ])],
@@ -136,6 +147,8 @@ class GdgGUI:
                 [sg.Text('Target (us)'), sg.Input('', key='inp_target_delay', size=(10, 1)),
                  sg.Text('Step (us)'), sg.Input('', key='inp_ramp_step', size=(10, 1)),
                  sg.Text('Interval (s)'), sg.Input('', key='inp_ramp_interval', size=(10, 1))],
+                [sg.Text('Pause Every (us)'), sg.Input('', key='inp_ramp_pause_every', size=(10, 1), tooltip='Optional. Pause ramp after every N us increase/decrease'),
+                 sg.Text('Pause Time (s)'), sg.Input('', key='inp_ramp_pause_time', size=(10, 1), tooltip='Optional. Wait duration in seconds during pause')],
                 [sg.Button('Start Ramp', key='start_ramp', size=(12, 1), button_color=('white', '#007ACC')),
                  sg.Button('Stop Ramp', key='stop_ramp', size=(12, 1), button_color=('white', '#CC3333'), disabled=True)]
             ])]
@@ -144,7 +157,7 @@ class GdgGUI:
 
         # Log area
         log_col = sg.Frame(title='Log', layout=[[sg.Multiline('', key='out_log', size=(100, 10), disabled=True,
-                               autoscroll=True, text_color='#B22222', background_color='white')]], element_justification='left')
+                                                              autoscroll=True, text_color='#B22222', background_color='white')]], element_justification='left')
 
         layout = [
             [sg.Menu(menu_def, background_color='white', tearoff=False)],
@@ -152,7 +165,8 @@ class GdgGUI:
             [sg.HorizontalSeparator()],
             [settings_col],
             [log_col],
-            [sg.Push(), sg.Button('Exit', size=(8, 1))]
+            [sg.Button('Save Log', key='save_log', size=(12, 1), button_color=('white', '#007ACC')),
+             sg.Push(), sg.Button('Exit', size=(8, 1))]
         ]
 
         # create window with a fixed size and center it to avoid tiling WMs forcing fullscreen
@@ -165,7 +179,7 @@ class GdgGUI:
             except Exception:
                 pass
             # set a sensible fixed size and center on screen
-            width, height = 1100, 800
+            width, height = 1100, 920
             sw = tk.winfo_screenwidth()
             sh = tk.winfo_screenheight()
             x = int((sw - width) / 2)
@@ -210,6 +224,8 @@ class GdgGUI:
         self.window['inp_autorun_end'].update(disabled=not enabled or any_active)
         self.window['inp_step'].update(disabled=not enabled or any_active)
         self.window['inp_interval'].update(disabled=not enabled or any_active)
+        self.window['inp_pause_every'].update(disabled=not enabled or any_active)
+        self.window['inp_pause_time'].update(disabled=not enabled or any_active)
         self.window['autorun'].update(disabled=not enabled or any_active)
         self.window['stop_autorun'].update(disabled=not enabled or not self.autorun_running)
 
@@ -217,6 +233,8 @@ class GdgGUI:
         self.window['inp_target_delay'].update(disabled=not enabled or any_active)
         self.window['inp_ramp_step'].update(disabled=not enabled or any_active)
         self.window['inp_ramp_interval'].update(disabled=not enabled or any_active)
+        self.window['inp_ramp_pause_every'].update(disabled=not enabled or any_active)
+        self.window['inp_ramp_pause_time'].update(disabled=not enabled or any_active)
         self.window['start_ramp'].update(disabled=not enabled or any_active)
         self.window['stop_ramp'].update(disabled=not enabled or not self.ramp_running)
 
@@ -224,9 +242,12 @@ class GdgGUI:
         success = client.connect(host)
         self.window.write_event_value('-CONNECT_FINISHED-', (host, success))
 
-    def execute_autorun(self, client, ch, start, end, step, interval):
+    def execute_autorun(self, client, ch, start, end, step, interval, pause_every=None, pause_time=None):
         client.logger.info(f"Start auto sweep for channel {ch.upper()}: {start} us -> {end} us (step: {step} us, interval: {interval} s)")
+        if pause_every and pause_time:
+            client.logger.info(f"Sweep pause configured: every {pause_every} us for {pause_time} s")
         current = start
+        last_pause_val = start
         try:
             if start <= end:
                 while current <= end:
@@ -238,12 +259,30 @@ class GdgGUI:
                         client.logger.error(f"Failed to set delay to {val_str} us. Aborting sweep.")
                         break
 
-                    slept = 0.0
-                    while slept < interval:
-                        if self.autorun_stop_event.is_set():
-                            break
-                        time.sleep(0.05)
-                        slept += 0.05
+                    if pause_every and pause_time and abs(current - last_pause_val) >= pause_every - 1e-9:
+                        client.logger.info(f"Delay change reached {abs(current - last_pause_val):.1f} us (>= {pause_every:.1f} us). Pausing sweep for {pause_time:.1f} s...")
+                        last_pause_val = current
+                        slept = 0.0
+                        last_log_time = 0.0
+                        while slept < pause_time:
+                            if self.autorun_stop_event.is_set():
+                                break
+                            if slept - last_log_time >= 10.0:
+                                client.logger.info(f"Pause ongoing: {pause_time - slept:.0f} s remaining...")
+                                last_log_time = slept
+                            time.sleep(0.1)
+                            slept += 0.1
+                    else:
+                        slept = 0.0
+                        while slept < interval:
+                            if self.autorun_stop_event.is_set():
+                                break
+                            time.sleep(0.05)
+                            slept += 0.05
+
+                    if self.autorun_stop_event.is_set():
+                        client.logger.info("Sweep cancelled by user.")
+                        break
 
                     if current == end:
                         break
@@ -258,12 +297,30 @@ class GdgGUI:
                         client.logger.error(f"Failed to set delay to {val_str} us. Aborting sweep.")
                         break
 
-                    slept = 0.0
-                    while slept < interval:
-                        if self.autorun_stop_event.is_set():
-                            break
-                        time.sleep(0.05)
-                        slept += 0.05
+                    if pause_every and pause_time and abs(current - last_pause_val) >= pause_every - 1e-9:
+                        client.logger.info(f"Delay change reached {abs(current - last_pause_val):.1f} us (>= {pause_every:.1f} us). Pausing sweep for {pause_time:.1f} s...")
+                        last_pause_val = current
+                        slept = 0.0
+                        last_log_time = 0.0
+                        while slept < pause_time:
+                            if self.autorun_stop_event.is_set():
+                                break
+                            if slept - last_log_time >= 10.0:
+                                client.logger.info(f"Pause ongoing: {pause_time - slept:.0f} s remaining...")
+                                last_log_time = slept
+                            time.sleep(0.1)
+                            slept += 0.1
+                    else:
+                        slept = 0.0
+                        while slept < interval:
+                            if self.autorun_stop_event.is_set():
+                                break
+                            time.sleep(0.05)
+                            slept += 0.05
+
+                    if self.autorun_stop_event.is_set():
+                        client.logger.info("Sweep cancelled by user.")
+                        break
 
                     if current == end:
                         break
@@ -279,7 +336,9 @@ class GdgGUI:
     def parse_and_update_status_monitor(self, resp):
         if not resp:
             return
-        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', resp)
+        # Strip control characters to avoid breaking number boundaries
+        cleaned_resp = "".join(c for c in resp if 32 <= ord(c) < 127 or c in '\r\n\t')
+        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', cleaned_resp)
         if len(numbers) >= 4:
             try:
                 self.window['status_delay_a'].update(f"{float(numbers[0]):.1f}")
@@ -299,9 +358,10 @@ class GdgGUI:
             return None
         self.parse_and_update_status_monitor(resp)
         # Extract all float or integer numbers
-        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', resp)
+        cleaned_resp = "".join(c for c in resp if 32 <= ord(c) < 127 or c in '\r\n\t')
+        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', cleaned_resp)
         if len(numbers) < 4:
-            client.logger.error("Could not parse enough parameters from read_all response: '%s'" % resp)
+            client.logger.error("Could not parse enough parameters from read_all response: '%s'" % escape_control_chars(resp))
             return None
 
         try:
@@ -316,13 +376,16 @@ class GdgGUI:
             client.logger.error("Error parsing delay values: %s" % str(e))
             return None
 
-    def execute_ramp(self, client, ch, start, target, step, interval):
+    def execute_ramp(self, client, ch, start, target, step, interval, pause_every=None, pause_time=None):
         """
         Background thread target that incrementally steps the delay value
         from 'start' to 'target' with 'step' increment and 'interval' seconds.
         """
         current = start
+        last_pause_val = start
         client.logger.info(f"Start gradual delay ramp for channel {ch.upper()}: {start} us -> {target} us (step: {step} us, interval: {interval} s)")
+        if pause_every and pause_time:
+            client.logger.info(f"Ramp pause configured: every {pause_every} us for {pause_time} s")
 
         try:
             if start < target:
@@ -336,13 +399,31 @@ class GdgGUI:
                         client.logger.error(f"Failed to set delay to {val_str} us. Aborting ramp.")
                         break
 
-                    # Sleep in small chunks to check the cancellation event frequently
-                    slept = 0.0
-                    while slept < interval:
-                        if self.ramp_stop_event.is_set():
-                            break
-                        time.sleep(0.05)
-                        slept += 0.05
+                    if pause_every and pause_time and abs(current - last_pause_val) >= pause_every - 1e-9:
+                        client.logger.info(f"Delay change reached {abs(current - last_pause_val):.1f} us (>= {pause_every:.1f} us). Pausing ramp for {pause_time:.1f} s...")
+                        last_pause_val = current
+                        slept = 0.0
+                        last_log_time = 0.0
+                        while slept < pause_time:
+                            if self.ramp_stop_event.is_set():
+                                break
+                            if slept - last_log_time >= 10.0:
+                                client.logger.info(f"Pause ongoing: {pause_time - slept:.0f} s remaining...")
+                                last_log_time = slept
+                            time.sleep(0.1)
+                            slept += 0.1
+                    else:
+                        # Sleep in small chunks to check the cancellation event frequently
+                        slept = 0.0
+                        while slept < interval:
+                            if self.ramp_stop_event.is_set():
+                                break
+                            time.sleep(0.05)
+                            slept += 0.05
+
+                    if self.ramp_stop_event.is_set():
+                        client.logger.info("Ramping cancelled by user.")
+                        break
             else:
                 while current > target:
                     if self.ramp_stop_event.is_set():
@@ -354,12 +435,30 @@ class GdgGUI:
                         client.logger.error(f"Failed to set delay to {val_str} us. Aborting ramp.")
                         break
 
-                    slept = 0.0
-                    while slept < interval:
-                        if self.ramp_stop_event.is_set():
-                            break
-                        time.sleep(0.05)
-                        slept += 0.05
+                    if pause_every and pause_time and abs(current - last_pause_val) >= pause_every - 1e-9:
+                        client.logger.info(f"Delay change reached {abs(current - last_pause_val):.1f} us (>= {pause_every:.1f} us). Pausing ramp for {pause_time:.1f} s...")
+                        last_pause_val = current
+                        slept = 0.0
+                        last_log_time = 0.0
+                        while slept < pause_time:
+                            if self.ramp_stop_event.is_set():
+                                break
+                            if slept - last_log_time >= 10.0:
+                                client.logger.info(f"Pause ongoing: {pause_time - slept:.0f} s remaining...")
+                                last_log_time = slept
+                            time.sleep(0.1)
+                            slept += 0.1
+                    else:
+                        slept = 0.0
+                        while slept < interval:
+                            if self.ramp_stop_event.is_set():
+                                break
+                            time.sleep(0.05)
+                            slept += 0.05
+
+                    if self.ramp_stop_event.is_set():
+                        client.logger.info("Ramping cancelled by user.")
+                        break
 
             if not self.ramp_stop_event.is_set() and current == target:
                 client.logger.info(f"Gradual delay ramp completed successfully at {target:.1f} us.")
@@ -417,7 +516,7 @@ class GdgGUI:
                     # Fetch initial parameters
                     resp = client.read_all()
                     if resp != "":
-                        self.window['output_val'].update(resp)
+                        self.window['output_val'].update(escape_control_chars(resp))
                         self.parse_and_update_status_monitor(resp)
                 else:
                     sg.popup_error("Error when connecting to host %s" % res_host)
@@ -454,7 +553,7 @@ class GdgGUI:
                 if resp == "":
                     client.logger.error("Return empty string from host")
                 else:
-                    self.window['output_val'].update(resp)
+                    self.window['output_val'].update(escape_control_chars(resp))
                     self.parse_and_update_status_monitor(resp)
 
             if event == 'write':
@@ -481,7 +580,7 @@ class GdgGUI:
                 # Refresh status monitor display after write
                 resp = client.read_all()
                 if resp != "":
-                    self.window['output_val'].update(resp)
+                    self.window['output_val'].update(escape_control_chars(resp))
                     self.parse_and_update_status_monitor(resp)
 
             if event == 'autorun':
@@ -537,6 +636,32 @@ class GdgGUI:
                     sg.popup_error(f"Invalid Sweep Interval: {str(e)}")
                     continue
 
+                sweep_pause_every = None
+                try:
+                    pause_every_str = values['inp_pause_every'].strip()
+                    if pause_every_str:
+                        sweep_pause_every = float(pause_every_str)
+                        if sweep_pause_every <= 0:
+                            raise ValueError("Pause threshold must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Pause Every: {str(e)}")
+                    continue
+
+                sweep_pause_time = None
+                try:
+                    pause_time_str = values['inp_pause_time'].strip()
+                    if pause_time_str:
+                        sweep_pause_time = float(pause_time_str)
+                        if sweep_pause_time <= 0:
+                            raise ValueError("Pause time must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Pause Time: {str(e)}")
+                    continue
+
+                if (sweep_pause_every is not None and sweep_pause_time is None) or (sweep_pause_every is None and sweep_pause_time is not None):
+                    sg.popup_error("Both Sweep 'Pause Every' and 'Pause Time' must be set (or both left empty)")
+                    continue
+
                 selected_ch = [k for k in key_ch if values[k]][0]
 
                 self.autorun_running = True
@@ -544,7 +669,7 @@ class GdgGUI:
                 self.autorun_stop_event.clear()
                 self.autorun_thread = threading.Thread(
                     target=self.execute_autorun,
-                    args=(client, selected_ch, sweep_start, sweep_end, sweep_step, sweep_interval),
+                    args=(client, selected_ch, sweep_start, sweep_end, sweep_step, sweep_interval, sweep_pause_every, sweep_pause_time),
                     daemon=True
                 )
                 self.autorun_thread.start()
@@ -558,7 +683,7 @@ class GdgGUI:
                 self.update_control_states()
                 resp = client.read_all()
                 if resp != "":
-                    self.window['output_val'].update(resp)
+                    self.window['output_val'].update(escape_control_chars(resp))
                     self.parse_and_update_status_monitor(resp)
 
             if event == 'start_ramp':
@@ -603,6 +728,32 @@ class GdgGUI:
                     sg.popup_error(f"Invalid Interval: {str(e)}")
                     continue
 
+                ramp_pause_every = None
+                try:
+                    pause_every_str = values['inp_ramp_pause_every'].strip()
+                    if pause_every_str:
+                        ramp_pause_every = float(pause_every_str)
+                        if ramp_pause_every <= 0:
+                            raise ValueError("Pause threshold must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Pause Every: {str(e)}")
+                    continue
+
+                ramp_pause_time = None
+                try:
+                    pause_time_str = values['inp_ramp_pause_time'].strip()
+                    if pause_time_str:
+                        ramp_pause_time = float(pause_time_str)
+                        if ramp_pause_time <= 0:
+                            raise ValueError("Pause time must be positive")
+                except ValueError as e:
+                    sg.popup_error(f"Invalid Pause Time: {str(e)}")
+                    continue
+
+                if (ramp_pause_every is not None and ramp_pause_time is None) or (ramp_pause_every is None and ramp_pause_time is not None):
+                    sg.popup_error("Both Ramp 'Pause Every' and 'Pause Time' must be set (or both left empty)")
+                    continue
+
                 selected_ch = [k for k in key_ch if values[k]][0]
 
                 # Fetch current delay value of selected channel
@@ -622,7 +773,7 @@ class GdgGUI:
                 self.ramp_stop_event.clear()
                 self.ramp_thread = threading.Thread(
                     target=self.execute_ramp,
-                    args=(client, selected_ch, start_delay, target_delay, ramp_step, ramp_interval),
+                    args=(client, selected_ch, start_delay, target_delay, ramp_step, ramp_interval, ramp_pause_every, ramp_pause_time),
                     daemon=True
                 )
                 self.ramp_thread.start()
@@ -636,10 +787,27 @@ class GdgGUI:
                 self.update_control_states()
                 resp = client.read_all()
                 if resp != "":
-                    self.window['output_val'].update(resp)
+                    self.window['output_val'].update(escape_control_chars(resp))
                     self.parse_and_update_status_monitor(resp)
             if event == 'version':
                 self.info_popup()
+            if event == 'save_log':
+                log_content = self.window['out_log'].get()
+                default_filename = f"gdg_log_{int(time.time())}.log"
+                filepath = sg.popup_get_file(
+                    'Save Log File',
+                    save_as=True,
+                    default_path=default_filename,
+                    file_types=(('Log Files', '*.log'), ('All Files', '*.*')),
+                    no_window=True
+                )
+                if filepath:
+                    try:
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write(log_content)
+                        sg.popup_ok(f"Log saved successfully to:\n{filepath}")
+                    except Exception as e:
+                        sg.popup_error(f"Failed to save log file:\n{str(e)}")
             # Poll queue
             try:
                 record = client.log_queue.get(block=False)
